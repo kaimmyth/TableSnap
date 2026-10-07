@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Excel Table → Image</title>
+<style>
+*{box-sizing:border-box}
+:root{--bg:#f4f6f8;--card:#fff;--text:#17202a;--muted:#667085;--border:#d9dee5;--accent:#2563eb}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
+.app{max-width:1200px;margin:auto;padding:28px 20px 40px}
+h1{margin:0 0 6px;font-size:26px}
+.sub{margin:0 0 22px;color:var(--muted)}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:18px}
+textarea{width:100%;min-height:150px;resize:vertical;padding:12px;border:1px solid var(--border);border-radius:8px;font:14px/1.5 Consolas,monospace;outline:none}
+textarea:focus{border-color:var(--accent)}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
+button{border:0;border-radius:8px;padding:10px 15px;min-height:42px;cursor:pointer;font-weight:600;background:#e9edf2;color:var(--text)}
+button:hover{background:#dfe5ec}
+button.primary{background:var(--accent);color:#fff}
+button.primary:hover{background:#1d4ed8}
+button:disabled{opacity:.5;cursor:not-allowed}
+.status{margin-top:10px;min-height:20px;color:var(--muted);font-size:13px}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:8px;background:#fff;max-height:600px}
+table{border-collapse:collapse;width:100%;min-width:1000px;table-layout:fixed;background:#fff}
+th,td{border:1px solid #cfd5dc;padding:9px 12px;text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+th{background:#eef2f6;font-weight:700;position:sticky;top:0;z-index:1}
+tr:nth-child(even) td{background:#fafbfc}
+.empty{padding:35px;text-align:center;color:var(--muted)}
+.preview-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.preview-title h2{margin:0;font-size:18px}
+.count{color:var(--muted);font-size:13px}
+.options{display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-top:14px;color:var(--muted);font-size:14px}
+label{display:inline-flex;align-items:center;gap:7px;cursor:pointer}
+input[type=checkbox]{width:17px;height:17px}
+@media(max-width:600px){.app{padding:18px 12px 30px}.panel{padding:13px}.toolbar button{flex:1 1 140px}}
+</style>
+</head>
+<body>
+<main class="app">
+<h1>Excel Table → Image</h1>
+<p class="sub">Copy cells from Excel, paste them below, preview the table, then copy or download it as an image.</p>
+
+<section class="panel">
+<textarea id="pasteArea" placeholder="Paste your Excel table here (Ctrl + V)..."></textarea>
+<div class="toolbar">
+<button class="primary" id="renderBtn" type="button">Render Table</button>
+<button id="clearBtn" type="button">Clear</button>
+<button id="sampleBtn" type="button">Load Sample</button>
+</div>
+<div class="options">
+<label><input id="headerCheck" type="checkbox" checked> First row is header</label>
+<label><input id="zebraCheck" type="checkbox" checked> Alternating rows</label>
+<label><input id="gridCheck" type="checkbox" checked> Cell borders</label>
+</div>
+<div class="status" id="status" aria-live="polite"></div>
+</section>
+
+<section class="panel">
+<div class="preview-title">
+<h2>Preview</h2>
+<span class="count" id="count">0 rows × 0 columns</span>
+</div>
+<div class="table-wrap" id="tableWrap">
+<div class="empty">Paste an Excel table to begin.</div>
+</div>
+<div class="toolbar">
+<button class="primary" id="copyBtn" type="button" disabled>Copy as Image</button>
+<button id="downloadBtn" type="button" disabled>Download PNG</button>
+</div>
+</section>
+</main>
+
+<script>
+(() => {
+"use strict";
+
+const pasteArea=document.getElementById("pasteArea");
+const renderBtn=document.getElementById("renderBtn");
+const clearBtn=document.getElementById("clearBtn");
+const sampleBtn=document.getElementById("sampleBtn");
+const copyBtn=document.getElementById("copyBtn");
+const downloadBtn=document.getElementById("downloadBtn");
+const headerCheck=document.getElementById("headerCheck");
+const zebraCheck=document.getElementById("zebraCheck");
+const gridCheck=document.getElementById("gridCheck");
+const tableWrap=document.getElementById("tableWrap");
+const status=document.getElementById("status");
+const count=document.getElementById("count");
+
+let tableData=[];
+
+function parseTSV(text){
+  const normalized=text.replace(/\r\n/g,"\n").replace(/\r/g,"\n").trimEnd();
+  return normalized.trim()?normalized.split("\n").map(row=>row.split("\t")):[];
+}
+
+function normalizeRows(rows){
+  const columnCount=rows.reduce((max,row)=>Math.max(max,row.length),0);
+  return rows.map(row=>row.concat(Array(Math.max(0,columnCount-row.length)).fill("")));
+}
+
+function escapeHtml(value){
+  return String(value)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#039;");
+}
+
+function renderTable(){
+  const rows=normalizeRows(parseTSV(pasteArea.value));
+  tableData=rows;
+  tableWrap.innerHTML="";
+
+  if(!rows.length){
+    tableWrap.innerHTML='<div class="empty">Paste an Excel table to begin.</div>';
+    count.textContent="0 rows × 0 columns";
+    copyBtn.disabled=true;
+    downloadBtn.disabled=true;
+    status.textContent="";
+    return;
+  }
+
+  const table=document.createElement("table");
+  const hasHeader=headerCheck.checked;
+  let markup="";
+
+  if(hasHeader){
+    markup+="<thead><tr>";
+    rows[0].forEach(cell=>markup+="<th>"+escapeHtml(cell)+"</th>");
+    markup+="</tr></thead>";
+  }
+
+  markup+="<tbody>";
+  rows.slice(hasHeader?1:0).forEach(row=>{
+    markup+="<tr>";
+    row.forEach(cell=>markup+="<td>"+escapeHtml(cell)+"</td>");
+    markup+="</tr>";
+  });
+  markup+="</tbody>";
+
+  table.innerHTML=markup;
+
+  if(!gridCheck.checked){
+    table.querySelectorAll("th,td").forEach(cell=>cell.style.borderColor="transparent");
+  }
+
+  if(!zebraCheck.checked){
+    table.querySelectorAll("tbody tr:nth-child(even) td").forEach(cell=>cell.style.background="white");
+  }
+
+  tableWrap.appendChild(table);
+
+  const bodyRows=hasHeader?rows.length-1:rows.length;
+  count.textContent=bodyRows+" rows × "+rows[0].length+" columns";
+  status.textContent="Table rendered successfully.";
+  copyBtn.disabled=false;
+  downloadBtn.disabled=false;
+}
+
+function wrapText(ctx,text,maxWidth,font){
+  ctx.font=font;
+  const lines=[];
+
+  String(text).split("\n").forEach(paragraph=>{
+    if(paragraph===""){
+      lines.push("");
+      return;
+    }
+
+    const words=paragraph.split(/\s+/);
+    let line="";
+
+    words.forEach(word=>{
+      /* Break very long words, URLs, IDs, etc. instead of allowing overflow. */
+      if(ctx.measureText(word).width>maxWidth){
+        if(line){
+          lines.push(line);
+          line="";
+        }
+
+        let chunk="";
+        for(const character of word){
+          const test=chunk+character;
+          if(ctx.measureText(test).width>maxWidth && chunk){
+            lines.push(chunk);
+            chunk=character;
+          }else{
+            chunk=test;
+          }
+        }
+        line=chunk;
+        return;
+      }
+
+      const test=line?line+" "+word:word;
+
+      if(ctx.measureText(test).width>maxWidth && line){
+        lines.push(line);
+        line=word;
+      }else{
+        line=test;
+      }
+    });
+
+    if(line||paragraph==="") lines.push(line);
+  });
+
+  return lines.length?lines:[""];
+}
+
+function createExportCanvas(){
+  if(!tableData.length)return null;
+
+  const hasHeader=headerCheck.checked;
+  const rows=tableData;
+  const columnCount=rows[0].length;
+
+  const outerPadding=24;
+  const cellPaddingX=14;
+  const cellPaddingY=11;
+  const font="14px Arial";
+  const headerFont="bold 14px Arial";
+  const lineHeight=20;
+  const minColumnWidth=90;
+  const maxColumnWidth=420;
+  const maxTableWidth=1800;
+
+  const canvas=document.createElement("canvas");
+  const ctx=canvas.getContext("2d");
+
+  /* Estimate each column from its widest unwrapped line. */
+  let widths=Array(columnCount).fill(minColumnWidth);
+
+  rows.forEach((row,rowIndex)=>{
+    const currentFont=hasHeader&&rowIndex===0?headerFont:font;
+    ctx.font=currentFont;
+
+    row.forEach((value,columnIndex)=>{
+      const longest=Math.max(
+        ...String(value).split("\n").map(line=>ctx.measureText(line).width)
+      );
+
+      widths[columnIndex]=Math.min(
+        maxColumnWidth,
+        Math.max(minColumnWidth,Math.ceil(longest+cellPaddingX*2))
+      );
+    });
+  });
+
+  /* Keep the image reasonably sized. */
+  const availableWidth=maxTableWidth-outerPadding*2;
+  const naturalWidth=widths.reduce((sum,width)=>sum+width,0);
+
+  if(naturalWidth>availableWidth){
+    const scale=availableWidth/naturalWidth;
+    widths=widths.map(width=>Math.max(
+      minColumnWidth,
+      Math.floor(width*scale)
+    ));
+  }
+
+  /* Wrap every cell according to its final column width. */
+  const wrappedRows=rows.map((row,rowIndex)=>{
+    const currentFont=hasHeader&&rowIndex===0?headerFont:font;
+
+    return row.map((value,columnIndex)=>{
+      const availableCellWidth=Math.max(
+        20,
+        widths[columnIndex]-cellPaddingX*2
+      );
+
+      return wrapText(
+        ctx,
+        value,
+        availableCellWidth,
+        currentFont
+      );
+    });
+  });
+
+  const rowHeights=wrappedRows.map(row=>{
+    const maxLines=Math.max(1,...row.map(lines=>lines.length));
+    return Math.max(
+      44,
+      maxLines*lineHeight+cellPaddingY*2
+    );
+  });
+
+  const totalWidth=widths.reduce((sum,width)=>sum+width,0)+outerPadding*2;
+  const totalHeight=rowHeights.reduce((sum,height)=>sum+height,0)+outerPadding*2;
+
+  const scale=Math.min(2,Math.max(1,window.devicePixelRatio||1));
+
+  canvas.width=Math.ceil(totalWidth*scale);
+  canvas.height=Math.ceil(totalHeight*scale);
+
+  ctx.scale(scale,scale);
+  ctx.fillStyle="#fff";
+  ctx.fillRect(0,0,totalWidth,totalHeight);
+  ctx.textBaseline="middle";
+
+  let y=outerPadding;
+
+  wrappedRows.forEach((row,rowIndex)=>{
+    const isHeader=hasHeader&&rowIndex===0;
+    let x=outerPadding;
+
+    row.forEach((lines,columnIndex)=>{
+      const width=widths[columnIndex];
+      const height=rowHeights[rowIndex];
+
+      if(isHeader){
+        ctx.fillStyle="#eef2f6";
+        ctx.fillRect(x,y,width,height);
+      }else if(zebraCheck.checked&&rowIndex%2===0){
+        ctx.fillStyle="#fafbfc";
+        ctx.fillRect(x,y,width,height);
+      }
+
+      if(gridCheck.checked){
+        ctx.strokeStyle="#cfd5dc";
+        ctx.lineWidth=1;
+        ctx.strokeRect(x+0.5,y+0.5,width-1,height-1);
+      }
+
+      ctx.font=isHeader?headerFont:font;
+      ctx.fillStyle="#17202a";
+
+      const blockHeight=lines.length*lineHeight;
+      let textY=y+(height-blockHeight)/2+lineHeight/2;
+
+      lines.forEach(line=>{
+        ctx.fillText(line,x+cellPaddingX,textY);
+        textY+=lineHeight;
+      });
+
+      x+=width;
+    });
+
+    y+=rowHeights[rowIndex];
+  });
+
+  return canvas;
+}
+
+async function copyAsImage(){
+  const canvas=createExportCanvas();
+  if(!canvas)return;
+
+  try{
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/png"));
+    if(!blob)throw new Error("Could not create image.");
+
+    if(!navigator.clipboard||!window.ClipboardItem){
+      throw new Error("Image clipboard is not supported.");
+    }
+
+    await navigator.clipboard.write([
+      new ClipboardItem({"image/png":blob})
+    ]);
+
+    status.textContent="Image copied to clipboard.";
+  }catch(error){
+    console.error(error);
+    status.textContent="Copy failed in this browser. Use Download PNG instead.";
+  }
+}
+
+function downloadPng(){
+  const canvas=createExportCanvas();
+  if(!canvas)return;
+
+  const link=document.createElement("a");
+  link.download="excel-table.png";
+  link.href=canvas.toDataURL("image/png");
+  link.click();
+
+  status.textContent="PNG downloaded.";
+}
+
+renderBtn.addEventListener("click",renderTable);
+pasteArea.addEventListener("paste",()=>setTimeout(renderTable,0));
+
+[headerCheck,zebraCheck,gridCheck].forEach(control=>{
+  control.addEventListener("change",renderTable);
+});
+
+clearBtn.addEventListener("click",()=>{
+  pasteArea.value="";
+  tableData=[];
+  renderTable();
+  pasteArea.focus();
+});
+
+sampleBtn.addEventListener("click",()=>{
+  pasteArea.value=
+`Issue\tSeverity\tPipeline\tEvidence\tObservation\tImpact\tRecommendation
+F01. Plain-text production deploy password\tCritical\tApp\tApp XML line 57 (msdeploy step)\tThe msdeploy command holds the user name and password for the deployment target.\tCredentials are exposed in source/configuration and may be visible to anyone with repository access.\tMove credentials to a secure Jenkins credential store and reference them at runtime.
+F05. Remote deploy target and local copy target do not match\tHigh\tApp\tApp line 57 versus lines 86, 90\tmsdeploy pushes to the remote target while local copy settings point elsewhere.\tIf Jenkins runs on a different machine, language and map files may be inconsistent.\tAlign the deployment target and package all required assets before deployment.
+F06. msdeploy sync removes live language and map files\tHigh\tApp\tApp lines 49, 57, 86-91\t-verb:sync makes the target match the source. Files on the live site can therefore be deleted.\tLive language and map assets can be removed unintentionally during deployment.\tUse explicit include/exclude rules or package required assets before deployment.
+F09. Transport security weakened on the deploy channel\tHigh\tApp\tApp line 57\t-allowUntrusted=true skips certificate validation and authType=Basic is used.\tThe deployment channel is open to interception on the network path.\tUse a trusted certificate and secure authentication for Web Deploy.
+F12. Build is not reproducible\tMedium\tApp\tApp lines 39-45, 97-98\tnpm install can resolve different package versions between runs.\tDifferent builds may contain different dependency versions, making troubleshooting difficult.\tUse a lockfile and deterministic npm ci builds.
+F16. App job is configured in the UI, not in source control\tMedium\tApp\tEntire App XML\tThe App job is a freestyle job. Its steps exist only in Jenkins configuration.\tChanges are not reviewed, versioned or easy to compare.\tReplace it with a Jenkinsfile in the repository.`;
+  renderTable();
+});
+
+copyBtn.addEventListener("click",copyAsImage);
+downloadBtn.addEventListener("click",downloadPng);
+})();
+</script>
+</body>
+</html>
